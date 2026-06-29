@@ -169,28 +169,42 @@ export default function App() {
 
   // ── Voice Input ────────────────────────────────────────────────────────
   function toggleVoice() {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
-    if (!SpeechRecognition) { alert('Voice input not supported in this browser. Try Chrome.'); return }
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+  if (!SpeechRecognition) { alert('Voice input not supported in this browser. Try Chrome.'); return }
 
-    if (listening) {
-      recognitionRef.current?.stop()
-      setListening(false)
-      return
-    }
-
-    const recognition = new SpeechRecognition()
-    recognition.lang = 'en-US'
-    recognition.interimResults = false
-    recognition.onresult = (e) => {
-      const transcript = e.results[0][0].transcript
-      setInput(prev => prev ? prev + ' ' + transcript : transcript)
-    }
-    recognition.onend = () => setListening(false)
-    recognition.onerror = () => setListening(false)
-    recognitionRef.current = recognition
-    recognition.start()
-    setListening(true)
+  if (listening) {
+    recognitionRef.current?.stop()
+    setListening(false)
+    return
   }
+
+  const recognition = new SpeechRecognition()
+  recognition.lang = 'en-US'
+  recognition.interimResults = false
+  recognition.onresult = (e) => {
+    const transcript = e.results[0][0].transcript
+    setInput(prev => {
+      const newVal = prev ? prev + ' ' + transcript : transcript
+      // ✅ Force textarea resize after voice input
+      setTimeout(() => {
+        if (textareaRef.current) {
+          textareaRef.current.style.height = 'auto'
+          textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 120) + 'px'
+          textareaRef.current.focus()
+        }
+      }, 0)
+      return newVal
+    })
+  }
+  recognition.onend = () => setListening(false)
+  recognition.onerror = (e) => {
+    console.error('Speech error:', e.error)
+    setListening(false)
+  }
+  recognitionRef.current = recognition
+  recognition.start()
+  setListening(true)
+}
 
   // ── Download / Export chat ─────────────────────────────────────────────
   function downloadChat() {
