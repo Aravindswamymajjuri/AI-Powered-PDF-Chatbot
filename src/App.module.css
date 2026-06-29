@@ -80,6 +80,12 @@
   flex-shrink: 0;
 }
 
+.sidebarHeaderActions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
 .logoWrap {
   display: flex;
   align-items: center;
@@ -124,6 +130,56 @@
   color: var(--text-primary);
 }
 .darkBtn:hover { background: var(--surface-2); transform: rotate(20deg); }
+
+/* ── Close sidebar button (mobile/tablet only — see media query) ── */
+.closeSidebarBtn {
+  display: none;
+  background: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  width: 34px;
+  height: 34px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+}
+.closeSidebarBtn:hover { background: var(--surface-2); }
+
+/* ── Hamburger button (mobile/tablet only — see media query) ── */
+.hamburgerBtn {
+  display: none;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 4px;
+  width: 38px;
+  height: 38px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+  padding: 0;
+  transition: background 0.18s;
+}
+.hamburgerBtn span {
+  display: block;
+  width: 18px;
+  height: 2px;
+  background: var(--text-primary);
+  border-radius: 2px;
+  transition: background 0.18s;
+}
+.hamburgerBtn:hover { background: var(--accent-light); }
+.hamburgerBtn:hover span { background: var(--accent); }
+
+/* ── Sidebar backdrop (mobile/tablet only — see media query) ── */
+.sidebarBackdrop {
+  display: none;
+}
 
 .newChatBtn {
   margin: 0.75rem;
@@ -911,27 +967,14 @@
 .pdfPreviewText {
   flex: 1;
   overflow-y: auto;
-  padding: 1rem;
-  font-size: 0.78rem;
+  padding: 1.1rem 1.25rem;
+  font-size: 0.8rem;
   font-family: 'JetBrains Mono', monospace;
   color: var(--text-secondary);
   white-space: pre-wrap;
   word-break: break-word;
-  line-height: 1.75;
+  line-height: 1.85;
   background: var(--surface-2);
-}
-
-/* ── Responsive ── */
-@media (max-width: 640px) {
-  .sidebar { width: 210px; }
-}
-@media (max-width: 480px) {
-  .layout { flex-direction: column; }
-  .sidebar { width: 100%; height: auto; border-right: none; border-bottom: 1px solid var(--border); }
-  .sessionList { flex-direction: row; overflow-x: auto; padding: 0.25rem 0.5rem; }
-  .sessionItem { min-width: 140px; }
-  .messages { padding: 1rem; }
-  .inputRow { padding: 0.7rem 1rem; }
 }
 
 /* ── Enhanced Preview Modal ── */
@@ -1105,3 +1148,56 @@
   line-height: 1.6;
 }
 .noVisual span { font-size: 2.5rem; opacity: 0.4; }
+
+/* ══════════════════════════════════════════════════════════════════════
+   ── Responsive: Tablet & Mobile sidebar (hamburger / overlay) ──
+   Sidebar becomes a fixed off-canvas overlay below 900px, instead of
+   permanently squeezing the chat area.
+   ══════════════════════════════════════════════════════════════════════ */
+@media (max-width: 900px) {
+  .hamburgerBtn { display: flex; }
+  .closeSidebarBtn { display: flex; }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100vh;
+    z-index: 200;
+    width: 280px;
+    max-width: 82vw;
+    transform: translateX(-100%);
+    transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+    box-shadow: 4px 0 24px rgba(0,0,0,0.18);
+    animation: none; /* avoid the slideInLeft entrance clashing with the transform-based toggle */
+  }
+
+  .sidebarOpen {
+    transform: translateX(0);
+  }
+
+  .sidebarBackdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(10, 10, 30, 0.5);
+    z-index: 150;
+    animation: fadeIn 0.2s ease;
+    backdrop-filter: blur(2px);
+  }
+
+  .mainArea { width: 100%; }
+}
+
+@media (max-width: 640px) {
+  .sidebar { width: 260px; }
+}
+
+@media (max-width: 480px) {
+  .sidebar { width: 84vw; max-width: 300px; }
+  .messages { padding: 1rem; }
+  .inputRow { padding: 0.7rem 1rem; }
+  .header { padding: 0.75rem 1rem; gap: 0.6rem; }
+  .headerActions { gap: 0.35rem; }
+  .actionBtn { padding: 0.4rem 0.65rem; font-size: 0.72rem; }
+}

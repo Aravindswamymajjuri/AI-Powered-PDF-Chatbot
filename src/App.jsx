@@ -35,6 +35,48 @@ function formatDate(ts) {
   return new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
+// ✅ Convert AI markdown into clean, readable plain text (for chat export).
+// Keeps structure (headings, bullets) but removes literal ** ### + symbols
+// that look like noise when read outside a markdown renderer.
+function markdownToPlainText(text) {
+  return text
+    .replace(/\r\n/g, '\n')
+    // Headings: "### Title" / "## Title" -> "TITLE" on its own line, underlined
+    .replace(/^#{1,6}\s*(.+)$/gm, (_, t) => `${t.toUpperCase()}\n${'-'.repeat(t.length)}`)
+    // Bold / italic markers -> plain text (keep the words, drop the symbols)
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    // Sub-bullets "  + item" -> "    - item"
+    .replace(/^(\s*)\+\s+/gm, '$1  - ')
+    // Top-level bullets "* item" or "- item" -> "  - item"
+    .replace(/^\*\s+/gm, '  - ')
+    .replace(/^-\s+/gm, '  - ')
+    // Collapse 3+ blank lines down to 2
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+// ✅ Reflow PDF.js-extracted text into readable paragraphs for the Raw Text
+// preview. PDF.js joins all words on a page with single spaces and discards
+// original line breaks, producing one dense unbroken block. This adds
+// breaks back at natural boundaries (bullets, page markers, sentence ends
+// followed by a likely new heading/section) so it reads top-to-bottom
+// instead of as a wall of text.
+function reflowPdfText(raw) {
+  return raw
+    // Keep [Page N] markers on their own line with spacing around them
+    .replace(/\[Page (\d+)\]/g, '\n\n[Page $1]\n')
+    // Break before bullet characters often produced by PDFs ( •, -, * used as list markers )
+    .replace(/\s*•\s*/g, '\n• ')
+    // Break before a capitalized "Section Heading:" style word run (2+ words, ends with colon)
+    .replace(/\s+([A-Z][A-Za-z]+(?:\s[A-Z][A-Za-z]+){0,4}:)\s+/g, '\n\n$1 ')
+    // Break after sentence-ending punctuation when followed by a capital letter starting a new thought
+    .replace(/([.!?])\s+(?=[A-Z])/g, '$1\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
 const STORAGE_KEY = 'pdf_chat_sessions'
 const ACTIVE_KEY  = 'pdf_chat_active'
 
@@ -137,6 +179,13 @@ function PdfPreviewModal({ text, pdfName, pdfDataUrl, pageCount, onClose }) {
   const [rendering, setRendering] = useState(false)
   const canvasRef = useRef(null)
   const renderTaskRef = useRef(null)
+  const pdfDocRef = useRef(null)   // ✅ cache the loaded PDF document across page changes
+
+  // ✅ If the modal is handed a different PDF, drop the cached document so
+  // the next render reloads from the new data instead of showing stale pages.
+  useEffect(() => {
+    pdfDocRef.current = null
+  }, [pdfDataUrl])
 
   // Render current page onto canvas whenever tab=visual or page changes
   useEffect(() => {
@@ -148,19 +197,33 @@ function PdfPreviewModal({ text, pdfName, pdfDataUrl, pageCount, onClose }) {
       setRendering(true)
       try {
         // Cancel any in-flight render
+        // ✅ pdf.js's RenderTask.cancel() does not always return a promise —
+        // calling .catch() on it unconditionally can throw "Cannot read
+        // properties of undefined (reading 'catch')" and abort the whole
+        // render, which is why navigating to a new page could appear to do nothing.
         if (renderTaskRef.current) {
-          await renderTaskRef.current.cancel().catch(() => {})
+          try {
+            const cancelResult = renderTaskRef.current.cancel()
+            if (cancelResult && typeof cancelResult.catch === 'function') {
+              await cancelResult.catch(() => {})
+            }
+          } catch {
+            // ignore — we're cancelling a stale render, any error here is harmless
+          }
           renderTaskRef.current = null
         }
 
-        // Decode base64 → Uint8Array
-        const base64 = pdfDataUrl.split(',')[1]
-        const binary = atob(base64)
-        const bytes  = new Uint8Array(binary.length)
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+        // ✅ Only decode + load the PDF document once; reuse it for every page change
+        if (!pdfDocRef.current) {
+          const base64 = pdfDataUrl.split(',')[1]
+          const binary = atob(base64)
+          const bytes  = new Uint8Array(binary.length)
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+          pdfDocRef.current = await pdfjsLib.getDocument({ data: bytes }).promise
+        }
+        if (cancelled) return
 
-        const pdfDoc  = await pdfjsLib.getDocument({ data: bytes }).promise
-        const pdfPage = await pdfDoc.getPage(page)
+        const pdfPage = await pdfDocRef.current.getPage(page)
 
         const canvas  = canvasRef.current
         if (!canvas || cancelled) return
@@ -267,7 +330,7 @@ function PdfPreviewModal({ text, pdfName, pdfDataUrl, pageCount, onClose }) {
 
           {/* ── Raw text tab ── */}
           {tab === 'raw' && (
-            <pre className={styles.pdfPreviewText}>{text}</pre>
+            <pre className={styles.pdfPreviewText}>{reflowPdfText(text)}</pre>
           )}
         </div>
       </div>
@@ -298,6 +361,7 @@ export default function App() {
   const [showPreview, setShowPreview] = useState(false)
   const [listening, setListening]     = useState(false)
   const [newMsgIndex, setNewMsgIndex] = useState(null)
+  const [sidebarOpen, setSidebarOpen] = useState(false)   // ✅ mobile/tablet sidebar toggle
   const messagesEndRef = useRef(null)
   const textareaRef    = useRef(null)
   const recognitionRef = useRef(null)
@@ -318,6 +382,14 @@ export default function App() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [activeSession?.messages, loading])
+
+  // ✅ Close sidebar with Escape key (mobile/tablet convenience)
+  useEffect(() => {
+    if (!sidebarOpen) return
+    function handleEsc(e) { if (e.key === 'Escape') setSidebarOpen(false) }
+    window.addEventListener('keydown', handleEsc)
+    return () => window.removeEventListener('keydown', handleEsc)
+  }, [sidebarOpen])
 
   // ── Voice Input (fixed for Vercel/HTTPS) ──────────────────────────────
   function toggleVoice() {
@@ -391,17 +463,40 @@ export default function App() {
   // ── Download chat ──────────────────────────────────────────────────────
   function downloadChat() {
     if (!activeSession) return
-    const lines = [
-      `AI PDF Chat Export`,
-      `PDF: ${activeSession.pdfName}`,
-      `Date: ${formatDate(activeSession.createdAt)}`,
-      `${'─'.repeat(50)}`,
-      '',
-      ...activeSession.messages.map(m =>
-        `[${m.role === 'user' ? 'You' : 'AI'}] ${m.ts ? formatTime(m.ts) + ' ' : ''}${m.content}`
-      )
+
+    const divider = '═'.repeat(60)
+    const turnDivider = '─'.repeat(60)
+
+    const header = [
+      divider,
+      '  AI PDF CHAT — CONVERSATION EXPORT',
+      divider,
+      `  Document : ${activeSession.pdfName}`,
+      `  Pages    : ${activeSession.pageCount}`,
+      `  Exported : ${formatDate(Date.now())}`,
+      divider,
+      ''
     ]
-    const blob = new Blob([lines.join('\n')], { type: 'text/plain' })
+
+    const body = activeSession.messages.flatMap((m, i) => {
+      const speaker = m.role === 'user' ? 'YOU' : 'AI ASSISTANT'
+      const time    = m.ts ? formatTime(m.ts) : ''
+      const content = m.role === 'user' ? m.content : markdownToPlainText(m.content)
+
+      return [
+        `${speaker}${time ? `  ·  ${time}` : ''}`,
+        '',
+        content,
+        '',
+        i < activeSession.messages.length - 1 ? turnDivider : '',
+        ''
+      ]
+    })
+
+    const footer = [divider, '  End of conversation', divider]
+
+    const text = [...header, ...body, ...footer].join('\n')
+    const blob = new Blob([text], { type: 'text/plain' })
     const url  = URL.createObjectURL(blob)
     const a    = document.createElement('a')
     a.href     = url
@@ -411,7 +506,15 @@ export default function App() {
   }
 
   // ── Session helpers ────────────────────────────────────────────────────
-  function createNewChat() { setActiveId(null); setError(''); setInput('') }
+  function createNewChat() {
+    setActiveId(null); setError(''); setInput('')
+    setSidebarOpen(false)   // ✅ auto-close on mobile/tablet
+  }
+
+  function selectSession(id) {
+    setActiveId(id); setError('')
+    setSidebarOpen(false)   // ✅ auto-close on mobile/tablet
+  }
 
   function deleteSession(id, e) {
     e.stopPropagation()
@@ -551,15 +654,26 @@ ${activeSession.pdfText}`
     <div className={styles.layout}>
 
       {/* ── Sidebar ── */}
-      <aside className={styles.sidebar}>
+      <aside className={`${styles.sidebar} ${sidebarOpen ? styles.sidebarOpen : ''}`}>
         <div className={styles.sidebarHeader}>
           <div className={styles.logoWrap}>
             <span className={styles.logoIcon}>✦</span>
             <span className={styles.logo}>PDF Chat</span>
           </div>
-          <button className={styles.darkBtn} onClick={() => setDarkMode(!darkMode)} title="Toggle theme">
-            {darkMode ? '☀️' : '🌙'}
-          </button>
+          <div className={styles.sidebarHeaderActions}>
+            <button className={styles.darkBtn} onClick={() => setDarkMode(!darkMode)} title="Toggle theme">
+              {darkMode ? '☀️' : '🌙'}
+            </button>
+            {/* ✅ Close button — only visible on mobile/tablet via CSS */}
+            <button
+              className={styles.closeSidebarBtn}
+              onClick={() => setSidebarOpen(false)}
+              title="Close sidebar"
+              aria-label="Close sidebar"
+            >
+              ✕
+            </button>
+          </div>
         </div>
 
         <button className={styles.newChatBtn} onClick={createNewChat}>
@@ -576,7 +690,7 @@ ${activeSession.pdfText}`
           {sessions.map(s => (
             <div key={s.id}
               className={`${styles.sessionItem} ${s.id === activeId ? styles.sessionActive : ''}`}
-              onClick={() => { setActiveId(s.id); setError('') }}
+              onClick={() => selectSession(s.id)}
             >
               <span className={styles.sessionIcon}>📄</span>
               <div className={styles.sessionMeta}>
@@ -591,11 +705,26 @@ ${activeSession.pdfText}`
         </div>
       </aside>
 
+      {/* ✅ Backdrop — only rendered/visible on mobile/tablet, closes sidebar on tap */}
+      {sidebarOpen && (
+        <div className={styles.sidebarBackdrop} onClick={() => setSidebarOpen(false)} />
+      )}
+
       {/* ── Main area ── */}
       <div className={styles.mainArea}>
 
         {/* ── Header ── */}
         <header className={styles.header}>
+          {/* ✅ Hamburger — only visible on mobile/tablet via CSS */}
+          <button
+            className={styles.hamburgerBtn}
+            onClick={() => setSidebarOpen(true)}
+            title="Open chat history"
+            aria-label="Open chat history"
+          >
+            <span /><span /><span />
+          </button>
+
           <div className={styles.headerLeft}>
             <h1 className={styles.headerTitle}>
               {activeSession ? activeSession.pdfName : 'AI PDF Chat'}
