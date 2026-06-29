@@ -9,8 +9,6 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
 
 const GROQ_API_KEY = import.meta.env.VITE_GROQ_API_KEY;
 
-
-// ── Helpers ────────────────────────────────────────────────────────────────
 function genId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2)
 }
@@ -37,7 +35,6 @@ function formatDate(ts) {
   return new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
-// ── Storage ────────────────────────────────────────────────────────────────
 const STORAGE_KEY = 'pdf_chat_sessions'
 const ACTIVE_KEY  = 'pdf_chat_active'
 
@@ -47,7 +44,7 @@ function loadSessions() {
 }
 function saveSessions(s) { localStorage.setItem(STORAGE_KEY, JSON.stringify(s)) }
 
-// ── TypingDots ─────────────────────────────────────────────────────────────
+// ── Typing Dots ────────────────────────────────────────────────────────────
 function TypingDots() {
   return (
     <div className={styles.typingWrap}>
@@ -56,8 +53,8 @@ function TypingDots() {
   )
 }
 
-// ── ChatMessage ────────────────────────────────────────────────────────────
-function ChatMessage({ message }) {
+// ── Chat Message ───────────────────────────────────────────────────────────
+function ChatMessage({ message, isNew }) {
   const [copied, setCopied] = useState(false)
   const isUser = message.role === 'user'
 
@@ -68,30 +65,37 @@ function ChatMessage({ message }) {
   }
 
   return (
-    <div className={`${styles.msgRow} ${isUser ? styles.msgUser : styles.msgAI}`}>
-      <div className={`${styles.bubble} ${isUser ? styles.bubbleUser : styles.bubbleAI}`}>
-        {isUser ? (
-          <p>{message.content}</p>
-        ) : (
-          <div
-            className={styles.mdContent}
-            dangerouslySetInnerHTML={{ __html: renderMarkdown(message.content) }}
-          />
-        )}
-      </div>
-      <div className={styles.msgMeta}>
-        {message.ts && <span className={styles.msgTime}>{formatTime(message.ts)}</span>}
-        {!isUser && (
-          <button className={styles.copyBtn} onClick={handleCopy} title="Copy answer">
-            {copied ? '✓ Copied' : '⎘ Copy'}
-          </button>
-        )}
+    <div className={`${styles.msgRow} ${isUser ? styles.msgUser : styles.msgAI} ${isNew ? styles.msgNew : ''}`}>
+      {!isUser && (
+        <div className={styles.avatarAI}>
+          <span>✦</span>
+        </div>
+      )}
+      <div className={styles.msgContent}>
+        <div className={`${styles.bubble} ${isUser ? styles.bubbleUser : styles.bubbleAI}`}>
+          {isUser ? (
+            <p>{message.content}</p>
+          ) : (
+            <div
+              className={styles.mdContent}
+              dangerouslySetInnerHTML={{ __html: renderMarkdown(message.content) }}
+            />
+          )}
+        </div>
+        <div className={styles.msgMeta}>
+          {message.ts && <span className={styles.msgTime}>{formatTime(message.ts)}</span>}
+          {!isUser && (
+            <button className={styles.copyBtn} onClick={handleCopy} title="Copy answer">
+              {copied ? '✓ Copied' : '⎘ Copy'}
+            </button>
+          )}
+        </div>
       </div>
     </div>
   )
 }
 
-// ── UploadZone ─────────────────────────────────────────────────────────────
+// ── Upload Zone ────────────────────────────────────────────────────────────
 function UploadZone({ onFile }) {
   const [dragging, setDragging] = useState(false)
   const inputRef = useRef(null)
@@ -113,9 +117,13 @@ function UploadZone({ onFile }) {
       role="button" tabIndex={0}
       onKeyDown={(e) => e.key === 'Enter' && inputRef.current.click()}
     >
-      <span className={styles.uploadIcon}>📄</span>
-      <p className={styles.uploadTitle}>Drop your PDF here or click to browse</p>
-      <p className={styles.uploadSub}>Text-based PDFs only</p>
+      <div className={styles.uploadIconWrap}>
+        <span className={styles.uploadIcon}>📄</span>
+        <div className={styles.uploadRing} />
+        <div className={styles.uploadRing2} />
+      </div>
+      <p className={styles.uploadTitle}>Drop your PDF here</p>
+      <p className={styles.uploadSub}>or click to browse · Text-based PDFs only</p>
       <input ref={inputRef} type="file" accept=".pdf" style={{ display: 'none' }}
         onChange={(e) => e.target.files[0] && onFile(e.target.files[0])} />
     </div>
@@ -123,16 +131,157 @@ function UploadZone({ onFile }) {
 }
 
 // ── PDF Preview Modal ──────────────────────────────────────────────────────
-function PdfPreviewModal({ text, pdfName, onClose }) {
+function PdfPreviewModal({ text, pdfName, pdfDataUrl, pageCount, onClose }) {
+  const [tab, setTab]         = useState('visual')   // 'visual' | 'raw'
+  const [page, setPage]       = useState(1)
+  const [rendering, setRendering] = useState(false)
+  const canvasRef = useRef(null)
+  const renderTaskRef = useRef(null)
+
+  // Render current page onto canvas whenever tab=visual or page changes
+  useEffect(() => {
+    if (tab !== 'visual' || !pdfDataUrl || !canvasRef.current) return
+
+    let cancelled = false
+
+    async function renderPage() {
+      setRendering(true)
+      try {
+        // Cancel any in-flight render
+        if (renderTaskRef.current) {
+          await renderTaskRef.current.cancel().catch(() => {})
+          renderTaskRef.current = null
+        }
+
+        // Decode base64 → Uint8Array
+        const base64 = pdfDataUrl.split(',')[1]
+        const binary = atob(base64)
+        const bytes  = new Uint8Array(binary.length)
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+
+        const pdfDoc  = await pdfjsLib.getDocument({ data: bytes }).promise
+        const pdfPage = await pdfDoc.getPage(page)
+
+        const canvas  = canvasRef.current
+        if (!canvas || cancelled) return
+
+        const devicePixelRatio = window.devicePixelRatio || 1
+        const containerWidth   = canvas.parentElement?.clientWidth || 600
+        const baseViewport     = pdfPage.getViewport({ scale: 1 })
+        const scale            = (containerWidth / baseViewport.width) * devicePixelRatio
+        const viewport         = pdfPage.getViewport({ scale })
+
+        canvas.width  = viewport.width
+        canvas.height = viewport.height
+        canvas.style.width  = `${viewport.width / devicePixelRatio}px`
+        canvas.style.height = `${viewport.height / devicePixelRatio}px`
+
+        const ctx = canvas.getContext('2d')
+        const task = pdfPage.render({ canvasContext: ctx, viewport })
+        renderTaskRef.current = task
+        await task.promise
+      } catch (err) {
+        if (err?.name !== 'RenderingCancelledException') console.error('PDF render error:', err)
+      } finally {
+        if (!cancelled) setRendering(false)
+      }
+    }
+
+    renderPage()
+    return () => { cancelled = true }
+  }, [tab, page, pdfDataUrl])
+
+  const canGoPrev = page > 1
+  const canGoNext = page < pageCount
+
   return (
     <div className={styles.modalOverlay} onClick={onClose}>
       <div className={styles.modalBox} onClick={(e) => e.stopPropagation()}>
+
+        {/* Header */}
         <div className={styles.modalHeader}>
-          <span>📄 {pdfName} — Extracted Text</span>
+          <div className={styles.modalTitleRow}>
+            <span className={styles.modalFileName}>📄 {pdfName}</span>
+            <span className={styles.modalPageBadge}>{pageCount} page{pageCount !== 1 ? 's' : ''}</span>
+          </div>
           <button className={styles.modalClose} onClick={onClose}>✕</button>
         </div>
-        <pre className={styles.pdfPreviewText}>{text}</pre>
+
+        {/* Tab switcher */}
+        <div className={styles.modalTabs}>
+          <button
+            className={`${styles.modalTab} ${tab === 'visual' ? styles.modalTabActive : ''}`}
+            onClick={() => setTab('visual')}
+          >
+            🖼 Visual Preview
+          </button>
+          <button
+            className={`${styles.modalTab} ${tab === 'raw' ? styles.modalTabActive : ''}`}
+            onClick={() => setTab('raw')}
+          >
+            📝 Raw Text
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className={styles.modalBody}>
+
+          {/* ── Visual tab ── */}
+          {tab === 'visual' && (
+            <div className={styles.visualTab}>
+              {!pdfDataUrl ? (
+                <div className={styles.noVisual}>
+                  <span>🖼</span>
+                  <p>Visual preview unavailable.<br />Re-upload the PDF to enable it.</p>
+                </div>
+              ) : (
+                <>
+                  <div className={styles.canvasWrap}>
+                    {rendering && (
+                      <div className={styles.canvasLoading}>
+                        <div className={styles.spinner} />
+                        <span>Rendering page {page}…</span>
+                      </div>
+                    )}
+                    <canvas ref={canvasRef} className={styles.pdfCanvas} />
+                  </div>
+
+                  {/* Page controls */}
+                  <div className={styles.pageControls}>
+                    <button
+                      className={styles.pageBtn}
+                      onClick={() => setPage(p => Math.max(1, p - 1))}
+                      disabled={!canGoPrev}
+                    >← Prev</button>
+                    <span className={styles.pageNum}>Page {page} of {pageCount}</span>
+                    <button
+                      className={styles.pageBtn}
+                      onClick={() => setPage(p => Math.min(pageCount, p + 1))}
+                      disabled={!canGoNext}
+                    >Next →</button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* ── Raw text tab ── */}
+          {tab === 'raw' && (
+            <pre className={styles.pdfPreviewText}>{text}</pre>
+          )}
+        </div>
       </div>
+    </div>
+  )
+}
+
+// ── Voice Waveform ─────────────────────────────────────────────────────────
+function VoiceWaveform() {
+  return (
+    <div className={styles.waveform}>
+      {[...Array(5)].map((_, i) => (
+        <span key={i} className={styles.waveBar} style={{ animationDelay: `${i * 0.1}s` }} />
+      ))}
     </div>
   )
 }
@@ -148,9 +297,12 @@ export default function App() {
   const [error, setError]             = useState('')
   const [showPreview, setShowPreview] = useState(false)
   const [listening, setListening]     = useState(false)
+  const [newMsgIndex, setNewMsgIndex] = useState(null)
   const messagesEndRef = useRef(null)
   const textareaRef    = useRef(null)
   const recognitionRef = useRef(null)
+  const isListeningRef = useRef(false)   // ✅ ref tracks real listening state (avoids stale closure)
+  const transcriptRef  = useRef('')      // ✅ accumulates transcript to avoid duplicates
 
   const activeSession = sessions.find(s => s.id === activeId) || null
 
@@ -167,46 +319,76 @@ export default function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [activeSession?.messages, loading])
 
-  // ── Voice Input ────────────────────────────────────────────────────────
+  // ── Voice Input (fixed for Vercel/HTTPS) ──────────────────────────────
   function toggleVoice() {
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
-  if (!SpeechRecognition) { alert('Voice input not supported in this browser. Try Chrome.'); return }
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SpeechRecognition) {
+      alert('Voice input not supported in this browser. Try Chrome.')
+      return
+    }
 
-  if (listening) {
-    recognitionRef.current?.stop()
-    setListening(false)
-    return
-  }
+    // If already listening → stop
+    if (isListeningRef.current) {
+      recognitionRef.current?.stop()
+      isListeningRef.current = false
+      setListening(false)
+      return
+    }
 
-  const recognition = new SpeechRecognition()
-  recognition.lang = 'en-US'
-  recognition.interimResults = false
-  recognition.onresult = (e) => {
-    const transcript = e.results[0][0].transcript
-    setInput(prev => {
-      const newVal = prev ? prev + ' ' + transcript : transcript
-      // ✅ Force textarea resize after voice input
-      setTimeout(() => {
-        if (textareaRef.current) {
-          textareaRef.current.style.height = 'auto'
-          textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 120) + 'px'
-          textareaRef.current.focus()
+    // Reset accumulated transcript for this session
+    transcriptRef.current = ''
+
+    const recognition = new SpeechRecognition()
+    recognition.lang = 'en-US'
+    recognition.continuous = false        // ✅ Don't auto-restart
+    recognition.interimResults = false    // ✅ Only fire once per phrase
+
+    recognition.onstart = () => {
+      isListeningRef.current = true
+      setListening(true)
+    }
+
+    recognition.onresult = (e) => {
+      // ✅ Collect only NEW results (avoid duplicates from result index reuse)
+      let newText = ''
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) {
+          newText += e.results[i][0].transcript
         }
-      }, 0)
-      return newVal
-    })
-  }
-  recognition.onend = () => setListening(false)
-  recognition.onerror = (e) => {
-    console.error('Speech error:', e.error)
-    setListening(false)
-  }
-  recognitionRef.current = recognition
-  recognition.start()
-  setListening(true)
-}
+      }
+      if (!newText.trim()) return
 
-  // ── Download / Export chat ─────────────────────────────────────────────
+      transcriptRef.current = newText.trim()
+      setInput(prev => {
+        const combined = prev ? prev + ' ' + transcriptRef.current : transcriptRef.current
+        setTimeout(() => {
+          if (textareaRef.current) {
+            textareaRef.current.style.height = 'auto'
+            textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 120) + 'px'
+            textareaRef.current.focus()
+          }
+        }, 0)
+        return combined
+      })
+    }
+
+    recognition.onerror = (e) => {
+      console.error('Speech recognition error:', e.error)
+      isListeningRef.current = false
+      setListening(false)
+    }
+
+    recognition.onend = () => {
+      // ✅ Do NOT restart — this caused duplicate text on Vercel
+      isListeningRef.current = false
+      setListening(false)
+    }
+
+    recognitionRef.current = recognition
+    recognition.start()
+  }
+
+  // ── Download chat ──────────────────────────────────────────────────────
   function downloadChat() {
     if (!activeSession) return
     const lines = [
@@ -247,6 +429,14 @@ export default function App() {
     setExtracting(true)
     setError('')
     try {
+      // Store base64 for visual preview in modal
+      const pdfDataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload  = () => resolve(reader.result)
+        reader.onerror = () => reject(new Error('Failed to read file'))
+        reader.readAsDataURL(file)
+      })
+
       const arrayBuffer = await file.arrayBuffer()
       const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
       const total = pdf.numPages
@@ -264,6 +454,7 @@ export default function App() {
         pdfName: file.name,
         pageCount: total,
         pdfText: trimmed,
+        pdfDataUrl,
         messages: [{
           role: 'assistant',
           content: `PDF loaded! I've read **${file.name}** (${total} page${total > 1 ? 's' : ''}). Ask me anything about it.`,
@@ -288,12 +479,12 @@ export default function App() {
     const userMsg = { role: 'user', content: question, ts: Date.now() }
     const newMessages = [...activeSession.messages, userMsg]
     updateActiveMessages(newMessages)
+    setNewMsgIndex(newMessages.length - 1)
     setInput('')
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
     setLoading(true)
     setError('')
 
-    // ── STRICT system prompt — forces "not found" reply for off-topic questions ──
     const systemPrompt = `You are a PDF question-answering assistant. Your ONLY job is to answer questions based on the PDF content provided below.
 
 STRICT RULES you must follow without exception:
@@ -331,7 +522,10 @@ ${activeSession.pdfText}`
 
       const data = await response.json()
       const answer = data.choices?.[0]?.message?.content || 'No response received.'
-      updateActiveMessages([...newMessages, { role: 'assistant', content: answer, ts: Date.now() }])
+      const aiMsg = { role: 'assistant', content: answer, ts: Date.now() }
+      const final = [...newMessages, aiMsg]
+      updateActiveMessages(final)
+      setNewMsgIndex(final.length - 1)
     } catch (err) {
       setError(`Error: ${err.message}`)
       updateActiveMessages(newMessages)
@@ -359,17 +553,25 @@ ${activeSession.pdfText}`
       {/* ── Sidebar ── */}
       <aside className={styles.sidebar}>
         <div className={styles.sidebarHeader}>
-          <span className={styles.logo}>📑 PDF Chat</span>
+          <div className={styles.logoWrap}>
+            <span className={styles.logoIcon}>✦</span>
+            <span className={styles.logo}>PDF Chat</span>
+          </div>
           <button className={styles.darkBtn} onClick={() => setDarkMode(!darkMode)} title="Toggle theme">
             {darkMode ? '☀️' : '🌙'}
           </button>
         </div>
 
-        <button className={styles.newChatBtn} onClick={createNewChat}>+ New Chat</button>
+        <button className={styles.newChatBtn} onClick={createNewChat}>
+          <span className={styles.newChatPlus}>+</span> New Chat
+        </button>
 
         <div className={styles.sessionList}>
           {sessions.length === 0 && (
-            <p className={styles.noSessions}>No chats yet.<br />Upload a PDF to start.</p>
+            <div className={styles.noSessionsWrap}>
+              <span className={styles.noSessionsIcon}>📂</span>
+              <p className={styles.noSessions}>No chats yet.<br />Upload a PDF to start.</p>
+            </div>
           )}
           {sessions.map(s => (
             <div key={s.id}
@@ -405,7 +607,6 @@ ${activeSession.pdfText}`
             </p>
           </div>
 
-          {/* Header action buttons */}
           {activeSession && (
             <div className={styles.headerActions}>
               <button className={styles.actionBtn} onClick={() => setShowPreview(true)} title="Preview PDF text">
@@ -418,21 +619,31 @@ ${activeSession.pdfText}`
           )}
         </header>
 
-        {/* ── No session: upload screen ── */}
+        {/* ── Upload screen ── */}
         {!activeSession && (
           <div className={styles.uploadArea}>
             <div className={styles.uploadCard}>
-              <h2 className={styles.uploadCardTitle}>Start a new chat</h2>
-              <p className={styles.uploadCardSub}>Upload a PDF and ask questions about its content</p>
+              <div className={styles.uploadCardBadge}>AI-Powered</div>
+              <h2 className={styles.uploadCardTitle}>Chat with your PDF</h2>
+              <p className={styles.uploadCardSub}>Upload any text-based PDF and ask questions in plain language</p>
+
               {extracting ? (
                 <div className={styles.extracting}>
-                  <div className={styles.spinner} />
-                  <p>Extracting text from PDF…</p>
+                  <div className={styles.extractRing}>
+                    <div className={styles.spinner} />
+                  </div>
+                  <p>Reading your PDF…</p>
                 </div>
               ) : (
                 <UploadZone onFile={handleFile} />
               )}
               {error && <div className={styles.errorBox}>⚠ {error}</div>}
+
+              <div className={styles.featureRow}>
+                {['🔍 Smart Q&A', '🎤 Voice Input', '⬇ Export Chat'].map(f => (
+                  <span key={f} className={styles.featureChip}>{f}</span>
+                ))}
+              </div>
             </div>
           </div>
         )}
@@ -441,7 +652,7 @@ ${activeSession.pdfText}`
         {activeSession && (
           <div className={styles.chatArea}>
 
-            {/* Suggested questions — only before first user message */}
+            {/* Suggested questions */}
             {userMsgCount === 0 && (
               <div className={styles.suggestions}>
                 <span className={styles.suggestLabel}>Try asking:</span>
@@ -462,15 +673,19 @@ ${activeSession.pdfText}`
             {/* Messages */}
             <div className={styles.messages}>
               {activeSession.messages.map((msg, i) => (
-                <ChatMessage key={i} message={msg} />
+                <ChatMessage key={i} message={msg} isNew={i === newMsgIndex} />
               ))}
 
-              {/* AI loading indicator */}
               {loading && (
                 <div className={`${styles.msgRow} ${styles.msgAI}`}>
-                  <div className={`${styles.bubble} ${styles.bubbleAI} ${styles.loadingBubble}`}>
-                    <span className={styles.loadingLabel}>AI is thinking</span>
-                    <TypingDots />
+                  <div className={styles.avatarAI}>
+                    <span>✦</span>
+                  </div>
+                  <div className={styles.msgContent}>
+                    <div className={`${styles.bubble} ${styles.bubbleAI} ${styles.loadingBubble}`}>
+                      <span className={styles.loadingLabel}>Thinking</span>
+                      <TypingDots />
+                    </div>
                   </div>
                 </div>
               )}
@@ -480,15 +695,23 @@ ${activeSession.pdfText}`
 
             {error && <div className={styles.errorBoxInline}>⚠ {error}</div>}
 
+            {/* Voice listening banner */}
+            {listening && (
+              <div className={styles.listeningBanner}>
+                <VoiceWaveform />
+                <span>Listening… speak now</span>
+                <button className={styles.stopListenBtn} onClick={toggleVoice}>Stop</button>
+              </div>
+            )}
+
             {/* Input bar */}
             <div className={styles.inputRow}>
-              {/* Voice input button */}
               <button
                 className={`${styles.voiceBtn} ${listening ? styles.voiceBtnActive : ''}`}
                 onClick={toggleVoice}
                 title={listening ? 'Stop listening' : 'Voice input'}
               >
-                {listening ? '🔴' : '🎤'}
+                {listening ? <VoiceWaveform /> : '🎤'}
               </button>
 
               <textarea
@@ -520,6 +743,8 @@ ${activeSession.pdfText}`
         <PdfPreviewModal
           text={activeSession.pdfText}
           pdfName={activeSession.pdfName}
+          pdfDataUrl={activeSession.pdfDataUrl}
+          pageCount={activeSession.pageCount}
           onClose={() => setShowPreview(false)}
         />
       )}
